@@ -13,10 +13,11 @@ pool:
 
 variables:
   pythonVersion: '3.11'
-  # Replace these with your actual names
-  azureServiceConnection: 'AzureSubscriptionConnection'
-  resourceGroup: 'incident-insight-rg'
-  appName: 'incident-insight-hub'
+  # IMPORTANT: Replace these with your actual values before running the pipeline
+  # To find your service connection name: Project Settings → Service connections
+  azureServiceConnection: 'YOUR_SERVICE_CONNECTION_NAME_HERE'
+  resourceGroup: 'YOUR_RESOURCE_GROUP_NAME_HERE'
+  appName: 'YOUR_APP_SERVICE_NAME_HERE'
   websitePort: '8000'
 
 stages:
