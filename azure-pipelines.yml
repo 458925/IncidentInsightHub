@@ -1,0 +1,94 @@
+# Azure DevOps pipeline for Incident Insight Hub (Streamlit)
+# 1) Create a service connection in Azure DevOps Project Settings:
+#    Project Settings > Service connections > New > Azure Resource Manager
+#    Name it to match variables.azureServiceConnection below.
+# 2) Ensure the App Service exists (Linux, Python 3.11+) and replace app/resource group names below.
+# 3) First run will also set app settings and the startup command.
+
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  pythonVersion: '3.11'
+  # Replace these with your actual names
+  azureServiceConnection: 'AzureSubscriptionConnection'
+  resourceGroup: 'incident-insight-rg'
+  appName: 'incident-insight-hub'
+  websitePort: '8000'
+
+stages:
+- stage: Build
+  displayName: Build and Package
+  jobs:
+  - job: Build
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: Install Python dependencies
+
+    - task: ArchiveFiles@2
+      displayName: Create deployable zip
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/site.zip'
+        verbose: false
+        # Exclude common non-deployables
+        # Note: Adjust exclusions if needed
+        tarCompression: 'gz'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: Deploy
+  displayName: Deploy to Azure Web App (Linux)
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - task: DownloadBuildArtifacts@0
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'drop'
+        downloadPath: '$(Pipeline.Workspace)'
+
+    # Ensure required app settings and startup command are configured
+    - task: AzureCLI@2
+      displayName: Configure App Settings and Startup Command
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          az webapp config appsettings set \
+            --resource-group "$(resourceGroup)" \
+            --name "$(appName)" \
+            --settings WEBSITES_PORT=$(websitePort) SCM_DO_BUILD_DURING_DEPLOYMENT=true
+
+          # Set the startup command for Linux Web App
+          az webapp config set \
+            --resource-group "$(resourceGroup)" \
+            --name "$(appName)" \
+            --startup-file "python -m streamlit run app.py --server.port $(websitePort) --server.address 0.0.0.0 --server.headless true"
+
+    - task: AzureWebApp@1
+      displayName: Deploy package to Web App
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        appName: '$(appName)'
+        appType: 'webAppLinux'
+        package: '$(Pipeline.Workspace)/drop/site.zip' 
