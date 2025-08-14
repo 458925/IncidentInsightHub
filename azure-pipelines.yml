@@ -1,9 +1,6 @@
-# Azure DevOps pipeline for Incident Insight Hub (Streamlit)
-# 1) Create a service connection in Azure DevOps Project Settings:
-#    Project Settings > Service connections > New > Azure Resource Manager
-#    Name it to match variables.azureServiceConnection below.
-# 2) Ensure the App Service exists (Linux, Python 3.11+) and replace app/resource group names below.
-# 3) First run will also set app settings and the startup command.
+# Simplified Azure DevOps pipeline - Build and Test Only
+# This version removes Azure deployment tasks to avoid service connection issues
+# Deploy manually using the artifacts created by this pipeline
 
 trigger:
 - main
@@ -13,12 +10,6 @@ pool:
 
 variables:
   pythonVersion: '3.11'
-  # IMPORTANT: Replace these with your actual values before running the pipeline
-  # To find your service connection name: Project Settings → Service connections
-  azureServiceConnection: 'YOUR_SERVICE_CONNECTION_NAME_HERE'
-  resourceGroup: 'YOUR_RESOURCE_GROUP_NAME_HERE'
-  appName: 'YOUR_APP_SERVICE_NAME_HERE'
-  websitePort: '8000'
 
 stages:
 - stage: Build
@@ -83,186 +74,16 @@ stages:
         testResultsFiles: '**/test-*.xml'
         testRunTitle: 'Unit Tests'
 
-- stage: Deploy
-  displayName: Deploy to Azure Web App (Linux)
-  dependsOn: Build
-  jobs:
-  - job: Deploy
-    steps:
-    - task: DownloadBuildArtifacts@0
-      inputs:
-        buildType: 'current'
-        downloadType: 'single'
-        artifactName: 'drop'
-        downloadPath: '$(Pipeline.Workspace)'
-
-    # Ensure required app settings and startup command are configured
-    - task: AzureCLI@2
-      displayName: Configure App Settings and Startup Command
-      inputs:
-        azureSubscription: '$(azureServiceConnection)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          az webapp config appsettings set \
-            --resource-group "$(resourceGroup)" \
-            --name "$(appName)" \
-            --settings WEBSITES_PORT=$(websitePort) SCM_DO_BUILD_DURING_DEPLOYMENT=true
-
-          # Set the startup command for Linux Web App
-          az webapp config set \
-            --resource-group "$(resourceGroup)" \
-            --name "$(appName)" \
-            --startup-file "python -m streamlit run app.py --server.port $(websitePort) --server.address 0.0.0.0 --server.headless true"
-
-    - task: AzureWebApp@1
-      displayName: Deploy package to Web App
-      inputs:
-        azureSubscription: '$(azureServiceConnection)'
-        appName: '$(appName)'
-        appType: 'webAppLinux'
-        package: '$(Pipeline.Workspace)/drop/site.zip'
-
-- stage: PostDeploymentValidation
-  displayName: Post-Deployment Testing & Validation
-  dependsOn: Deploy
-  jobs:
-  - job: HealthCheck
-    steps:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '$(pythonVersion)'
-
-    - task: DownloadBuildArtifacts@0
-      inputs:
-        buildType: 'current'
-        downloadType: 'single'
-        artifactName: 'drop'
-        downloadPath: '$(Pipeline.Workspace)'
-
     - script: |
-        python -m pip install --upgrade pip
-        pip install requests
-      displayName: Install Health Check Dependencies
-
-    - script: |
-        # Extract and run health check
-        cd $(Pipeline.Workspace)/drop
-        unzip -q site.zip
-        python tests/test_health.py --url "https://$(appName).azurewebsites.net" --timeout 60 --retries 10
-      displayName: Run Deployment Health Check
-      timeoutInMinutes: 15
-
-    - task: AzureCLI@2
-      displayName: Verify App Service Status
-      inputs:
-        azureSubscription: '$(azureServiceConnection)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          echo "Checking App Service status..."
-          az webapp show --resource-group "$(resourceGroup)" --name "$(appName)" --query "state" -o tsv
-          
-          echo "Checking App Service logs..."
-          az webapp log tail --resource-group "$(resourceGroup)" --name "$(appName)" --provider application --timeout 30 || true
-          
-          echo "Testing application endpoint..."
-          curl -f -s -o /dev/null -w "%{http_code}" "https://$(appName).azurewebsites.net" || echo "Endpoint test failed"
-
-    - script: |
-        # Performance and load test (basic)
-        python -c "
-        import requests
-        import time
-        
-        url = 'https://$(appName).azurewebsites.net'
-        print(f'Testing performance for {url}')
-        
-        # Test response times
-        times = []
-        for i in range(3):
-            start = time.time()
-            try:
-                response = requests.get(url, timeout=30)
-                elapsed = time.time() - start
-                times.append(elapsed)
-                print(f'Request {i+1}: {response.status_code} in {elapsed:.2f}s')
-            except Exception as e:
-                print(f'Request {i+1} failed: {e}')
-        
-        if times:
-            avg_time = sum(times) / len(times)
-            print(f'Average response time: {avg_time:.2f}s')
-            if avg_time > 15:
-                print('WARNING: Slow response times detected')
-            else:
-                print('✓ Response times acceptable')
-        "
-      displayName: Basic Performance Test
-
-  - job: SecurityCheck
-    steps:
-    - task: AzureCLI@2
-      displayName: Security Configuration Check
-      inputs:
-        azureSubscription: '$(azureServiceConnection)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          echo "Checking HTTPS configuration..."
-          https_only=$(az webapp show --resource-group "$(resourceGroup)" --name "$(appName)" --query "httpsOnly" -o tsv)
-          echo "HTTPS Only: $https_only"
-          
-          echo "Checking minimum TLS version..."
-          tls_version=$(az webapp config show --resource-group "$(resourceGroup)" --name "$(appName)" --query "minTlsVersion" -o tsv)
-          echo "Min TLS Version: $tls_version"
-          
-          echo "Checking application settings..."
-          az webapp config appsettings list --resource-group "$(resourceGroup)" --name "$(appName)" --query "[?name=='WEBSITES_PORT']" -o table
-
-  - job: IntegrationTest
-    steps:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '$(pythonVersion)'
-
-    - script: |
-        pip install requests selenium webdriver-manager
-      displayName: Install Integration Test Dependencies
-
-    - script: |
-        # Basic integration test
-        python -c "
-        import requests
-        import json
-        
-        base_url = 'https://$(appName).azurewebsites.net'
-        
-        print('Running integration tests...')
-        
-        # Test 1: Basic connectivity
-        try:
-            response = requests.get(base_url, timeout=30)
-            assert response.status_code == 200, f'Expected 200, got {response.status_code}'
-            print('✓ Basic connectivity test passed')
-        except Exception as e:
-            print(f'✗ Basic connectivity test failed: {e}')
-            exit(1)
-        
-        # Test 2: Check for Streamlit indicators
-        if 'streamlit' in response.text.lower():
-            print('✓ Streamlit application detected')
-        else:
-            print('? Streamlit indicators not found in response')
-        
-        # Test 3: Check for app-specific content
-        if 'incident insight hub' in response.text.lower():
-            print('✓ Application-specific content detected')
-        else:
-            print('? Application-specific content not found')
-        
-        print('Integration tests completed successfully')
-        "
-      displayName: Run Integration Tests
-      timeoutInMinutes: 10 
+        echo "✅ Build completed successfully!"
+        echo "📦 Deployment package created: site.zip"
+        echo "🚀 Ready for manual deployment to Azure"
+        echo ""
+        echo "To deploy manually:"
+        echo "1. Download the 'drop' artifact from this pipeline run"
+        echo "2. Extract site.zip"
+        echo "3. Deploy to Azure App Service via:"
+        echo "   - Azure Portal (Deployment Center)"
+        echo "   - VS Code Azure extension"
+        echo "   - Azure CLI: az webapp deploy"
+      displayName: Build Summary and Next Steps 
